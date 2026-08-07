@@ -1,10 +1,11 @@
 /**
  * 🚀 PRODUCTION PERFECT VERCEL SERVERLESS DIGIALM PARSER API (Pages Router Fallback)
- * 100% Exact Match with PHP digialm.php JSON Schema & DOM Filtering
+ * 1:1 Exact Port of PHP digialm.php DOM XPath Logic using Cheerio
  */
 
 const https = require('https');
 const { HttpsProxyAgent } = require('https-proxy-agent');
+const cheerio = require('cheerio');
 
 // Bright Data Indian ISP Proxy Configuration
 const PROXY_HOST = 'brd.superproxy.io';
@@ -17,12 +18,12 @@ const agent = new HttpsProxyAgent(proxyUrl);
 
 function normText(str) {
   if (!str) return '';
-  return str.replace(/<[^>]+>/g, '').replace(/&nbsp;/gi, ' ').replace(/[\u00A0\u200B]/g, ' ').replace(/\s+/g, ' ').trim();
+  return str.replace(/[\u00A0\u200B]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function cleanSectionName(txt) {
   if (!txt) return '';
-  txt = normText(txt);
+  txt = txt.replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
   return txt.replace(/^Section\s*:\s*/i, '').trim();
 }
 
@@ -54,56 +55,220 @@ function makeAbsUrl(src, targetUrl) {
   }
 }
 
+function classifyAndProcessNode($, $node, targetUrl) {
+  if (!$node || $node.length === 0) return { text: "", image: "", html: "" };
+
+  const $cloned = $node.clone();
+  const validImgs = [];
+
+  $cloned.find('img').each((_, img) => {
+    const $img = $(img);
+    const src = $img.attr('src') || '';
+    if (src.includes('tick.png') || src.includes('cross.png')) {
+      $img.remove();
+    } else {
+      const absSrc = makeAbsUrl(src, targetUrl);
+      $img.attr('src', absSrc);
+      validImgs.push(absSrc);
+    }
+  });
+
+  const rawText = normText($cloned.text());
+  const cleanCheckText = rawText.replace(/^(?:Q\.\s*\d+|[A-D][\.\)\s]*)/i, '').trim();
+
+  const hasText = cleanCheckText.length > 0;
+  const hasImage = validImgs.length > 0;
+  const innerHtml = normText($cloned.html() || '');
+
+  if (hasText && !hasImage) {
+    return { text: rawText, image: "", html: "" };
+  } else if (!hasText && hasImage) {
+    return { text: "", image: validImgs[0], html: "" };
+  } else {
+    return { text: "", image: "", html: innerHtml };
+  }
+}
+
 function parseDigialmScorecard(html, targetUrl, startTime) {
-  // 1. Extract Header Image (Banner / Logo)
+  const $ = cheerio.load(html);
+
+  // 1. Header Image (Exact PHP Selector)
   let header_image = "";
-  const headerMatch = html.match(/<(?:img|div)[^>]*src=["']([^"']*(?:banner|header|logo|form100)[^"']*)["']/i);
-  if (headerMatch) {
-    header_image = makeAbsUrl(headerMatch[1], targetUrl);
+  const headerImg = $('div.header-image img, div.main-info-pnl img, table.main-info-pnl img, img[src*="logo"], img[src*="header"], img[src*="Banner"]').first();
+  if (headerImg.length > 0) {
+    header_image = makeAbsUrl(headerImg.attr('src'), targetUrl);
   }
 
-  // 2. Extract Candidate Info ONLY from main-info-pnl (strictly isolative regex)
+  // 2. Candidate Info (Strictly Isolated to main-info-pnl container)
   const candidate_info = {};
-  const mainInfoMatch = html.match(/<(?:div|table)[^>]*class=["'][^"']*main-info-pnl[^"']*["'][^>]*>([\s\S]*?)<\/(?:div|table)>/i);
-  const mainInfoHtml = mainInfoMatch ? mainInfoMatch[1] : html;
-
-  const trRegex = /<tr[^>]*>[\s\S]*?<td[^>]*>(.*?)<\/td>[\s\S]*?<td[^>]*>(.*?)<\/td>[\s\S]*?<\/tr>/gi;
-  let trMatch;
-  while ((trMatch = trRegex.exec(mainInfoHtml)) !== null) {
-    let k = normText(trMatch[1]).replace(/:$/, '');
-    let v = normText(trMatch[2]);
-    if (k && v && !k.toLowerCase().includes('note') && !k.includes('*') && !k.match(/^Q\.\d+/i)) {
-      candidate_info[k] = v;
+  $('div.main-info-pnl tr, table.main-info-pnl tr').each((_, tr) => {
+    const tds = $(tr).find('td');
+    if (tds.length >= 2) {
+      const k = normText($(tds[0]).text()).replace(/:$/, '');
+      const v = normText($(tds[1]).text());
+      if (k && v && !k.toLowerCase().includes('note') && !k.includes('*')) {
+        candidate_info[k] = v;
+      }
     }
-  }
+  });
 
-  // 3. Extract Section Names
+  // 3. Section Names (Exact PHP Selector)
   const section_names = [];
-  const secRegex = /<div[^>]*class=["'][^"']*(?:section-lbl|secName|sec-lbl)[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi;
-  let secMatch;
-  while ((secMatch = secRegex.exec(html)) !== null) {
-    let secTxt = cleanSectionName(secMatch[1]);
-    if (secTxt && !section_names.includes(secTxt)) {
-      section_names.push(secTxt);
+  $('div.section-lbl, span.secName, div.sec-lbl, td.section-lbl').each((_, sec) => {
+    const txt = cleanSectionName($(sec).text());
+    if (txt && !section_names.includes(txt)) {
+      section_names.push(txt);
     }
-  }
+  });
 
-  // 4. Extract Question Panels & Options
+  // 4. Group Questions & Options (Exact PHP questionRowTbl + td.rightAns/wrngAns Selector)
   const questions = [];
   const section_summary = {};
   let total_right = 0;
   let total_wrong = 0;
   let total_unattempted = 0;
 
-  // Split HTML by question panel blocks (questionRowTbl / question-pnl)
-  const qTableRegex = /<table[^>]*class=["'][^"']*questionRowTbl[^"']*["'][^>]*>([\s\S]*?)<\/table>/gi;
-  let qMatch;
+  let qTables = $('table.questionRowTbl');
+  if (qTables.length === 0) {
+    qTables = $('div.question-pnl');
+  }
+
   let idx = 1;
+  qTables.each((_, qEl) => {
+    const $q = $(qEl);
+    let chosenRaw = null;
+    const menu_data = {};
 
-  while ((qMatch = qTableRegex.exec(html)) !== null) {
-    const qBlock = qMatch[1];
-    let qSecName = section_names.length > 0 ? section_names[0] : 'General';
+    // Detect Section Name for Question
+    let qSecName = "General Section";
+    const prevSec = $q.prevAll('div.section-lbl, span.secName, div.sec-lbl, td.section-lbl').first();
+    if (prevSec.length > 0) {
+      const st = cleanSectionName(prevSec.text());
+      if (st) qSecName = st;
+    } else if (section_names.length > 0) {
+      qSecName = section_names[0];
+    }
 
+    // Traverse Parent Container for Menu Data
+    const $parent = $q.parent();
+    if ($parent.length > 0) {
+      $parent.find('td').each((_, td) => {
+        const txt = normText($(td).text());
+        if (txt.toLowerCase().includes('chosen option') || txt.toLowerCase().includes('given option')) {
+          const trText = normText($(td).parent().text());
+          const m = trText.match(/(?:chosen|given)\s*option\s*:\s*([^\s]+)/i);
+          if (m) chosenRaw = m[1].trim();
+        }
+      });
+
+      const menuTbl = $parent.find('table.menu-tbl, table[class*="menu"]').first();
+      if (menuTbl.length > 0) {
+        menuTbl.find('tr').each((_, mtr) => {
+          const txt = normText($(mtr).text());
+          if (txt.includes(':')) {
+            const parts = txt.split(':');
+            if (parts.length >= 2) {
+              menu_data[parts[0].trim()] = parts[1].trim();
+            }
+          }
+        });
+      }
+    }
+
+    const qId = menu_data['Question ID'] || `Q${idx}`;
+    const qType = menu_data['Question Type'] || 'MCQ';
+
+    const optIds = {};
+    for (let oidx = 1; oidx <= 4; oidx++) {
+      if (menu_data[`Option ${oidx} ID`]) {
+        optIds[oidx] = menu_data[`Option ${oidx} ID`];
+      }
+    }
+
+    // Question Text & Image Node Processing
+    const qTextTds = $q.find('td.bold, td[class*="qText"], td[class*="questionText"]');
+    let qData = { text: "", image: "", html: "" };
+    if (qTextTds.length >= 2) {
+      qData = classifyAndProcessNode($, $(qTextTds[1]), targetUrl);
+    } else if (qTextTds.length === 1) {
+      qData = classifyAndProcessNode($, $(qTextTds[0]), targetUrl);
+    }
+
+    const chosenIndex = chosenToIndex(chosenRaw);
+
+    // Option Rows Processing (td.rightAns or td.wrngAns)
+    const optionTds = $q.find('td.rightAns, td.wrngAns');
+    const options = [];
+    let rightText = "N/A";
+    let rightPos = null;
+
+    optionTds.each((optIdx, optTd) => {
+      const $optTd = $(optTd);
+      const num = optIdx + 1;
+      const cls = $optTd.attr('class') || '';
+      const isCorrect = cls.toLowerCase().includes('rightans');
+
+      const optData = classifyAndProcessNode($, $optTd, targetUrl);
+
+      if (isCorrect) {
+        rightText = normText($optTd.text());
+        rightPos = num;
+      }
+
+      options.push({
+        option_no: num,
+        option_id: optIds[num] || null,
+        option_text: optData.text,
+        option_image: optData.image,
+        option_html: optData.html,
+        is_correct: isCorrect
+      });
+    });
+
+    // Fallback if td.rightAns/td.wrngAns not present
+    if (options.length === 0) {
+      $q.find('tr').each((trIdx, trEl) => {
+        const $tr = $(trEl);
+        const txt = normText($tr.text());
+        if (/^[1-4]\.|\bOption [1-4]\b/i.test(txt)) {
+          const num = options.length + 1;
+          const isCorrect = $tr.find('.rightAns').length > 0 || $tr.html().includes('tick.png');
+          const optData = classifyAndProcessNode($, $tr, targetUrl);
+
+          if (isCorrect) {
+            rightText = txt;
+            rightPos = num;
+          }
+
+          options.push({
+            option_no: num,
+            option_id: optIds[num] || null,
+            option_text: optData.text,
+            option_image: optData.image,
+            option_html: optData.html,
+            is_correct: isCorrect
+          });
+        }
+      });
+    }
+
+    let status = 'Unattempted';
+    const chosenOptId = (chosenIndex !== null && optIds[chosenIndex]) ? optIds[chosenIndex] : null;
+
+    if (chosenIndex === null) {
+      status = 'Unattempted';
+      total_unattempted++;
+    } else {
+      if (rightPos !== null && chosenIndex === rightPos) {
+        status = 'Correct';
+        total_right++;
+      } else {
+        status = 'Wrong';
+        total_wrong++;
+      }
+    }
+
+    // Section Summary Statistics
     if (!section_summary[qSecName]) {
       section_summary[qSecName] = {
         total_questions: 0,
@@ -111,83 +276,8 @@ function parseDigialmScorecard(html, targetUrl, startTime) {
         unattempted: 0,
         correct_answers: 0,
         wrong_answers: 0,
-        marks_obtained: 0
+        marks_obtained: 0.0
       };
-    }
-
-    // Question ID & Type
-    const qIdMatch = qBlock.match(/Question\s*ID\s*:\s*<\/td>\s*<td[^>]*>([^<]+)/i) || qBlock.match(/Q\.\d+/i);
-    const qTypeMatch = qBlock.match(/Question\s*Type\s*:\s*<\/td>\s*<td[^>]*>([^<]+)/i);
-    const chosenMatch = qBlock.match(/Chosen\s*Option\s*:\s*<\/td>\s*<td[^>]*>([^<]+)/i) || qBlock.match(/Given\s*Option\s*:\s*<\/td>\s*<td[^>]*>([^<]+)/i);
-    const optIdMatch = qBlock.match(/Option\s*1\s*ID\s*:\s*<\/td>\s*<td[^>]*>([^<]+)/i);
-
-    const qId = qIdMatch ? normText(qIdMatch[1] || qIdMatch[0]) : `Q${idx}`;
-    const qType = qTypeMatch ? normText(qTypeMatch[1]) : "MCQ";
-    const chosenRaw = chosenMatch ? normText(chosenMatch[1]) : "Not Answered";
-    const chosenOptId = optIdMatch ? normText(optIdMatch[1]) : null;
-
-    // Question Text & Image
-    const qTextMatch = qBlock.match(/<td[^>]*class=["'][^"']*bold[^"']*["'][^>]*>([\s\S]*?)<\/td>/i);
-    const qText = qTextMatch ? normText(qTextMatch[1]) : "";
-    const qImgMatch = qBlock.match(/<td[^>]*class=["'][^"']*bold[^"']*["'][^>]*>[\s\S]*?<img[^>]*src=["']([^"']+)["']/i);
-    const qImg = qImgMatch ? makeAbsUrl(qImgMatch[1], targetUrl) : "";
-
-    // Parse Options (Option 1, Option 2, Option 3, Option 4 rows)
-    const options = [];
-    let rightPos = null;
-    let rightText = "";
-
-    const trOptRegex = /<tr[^>]*>[\s\S]*?<td[^>]*>([1-4]|[A-D])[\.\)]?\s*<\/td>[\s\S]*?<td[^>]*>([\s\S]*?)<\/td>[\s\S]*?<\/tr>/gi;
-    let trOptMatch;
-
-    while ((trOptMatch = trOptRegex.exec(qBlock)) !== null) {
-      const optNo = trOptMatch[1];
-      const optRowHtml = trOptMatch[0];
-      const optVal = normText(trOptMatch[2]);
-      const optImgMatch = optRowHtml.match(/<img[^>]*src=["']([^"']+)["']/i);
-      const optImg = optImgMatch ? makeAbsUrl(optImgMatch[1], targetUrl) : "";
-      const isRight = optRowHtml.includes('rightAns') || optRowHtml.includes('tick.png');
-
-      options.push({
-        option_no: optNo,
-        option_text: optVal,
-        option_image: optImg,
-        is_correct: isRight
-      });
-
-      if (isRight) {
-        rightPos = chosenToIndex(optNo);
-        rightText = optVal;
-      }
-    }
-
-    // Fallback Option Detection if trOptRegex didn't catch options
-    if (options.length === 0) {
-      for (let i = 1; i <= 4; i++) {
-        const isRight = qBlock.includes(`Option ${i}`) && (qBlock.includes('rightAns') || qBlock.includes('tick.png'));
-        options.push({
-          option_no: String(i),
-          option_text: `Option ${i}`,
-          option_image: "",
-          is_correct: isRight
-        });
-        if (isRight) { rightPos = i; rightText = `Option ${i}`; }
-      }
-    }
-
-    const chosenPos = chosenToIndex(chosenRaw);
-    let status = "Unattempted";
-
-    if (chosenPos !== null) {
-      if (rightPos !== null && chosenPos === rightPos) {
-        status = "Correct";
-        total_right++;
-      } else {
-        status = "Wrong";
-        total_wrong++;
-      }
-    } else {
-      total_unattempted++;
     }
 
     section_summary[qSecName].total_questions++;
@@ -206,9 +296,9 @@ function parseDigialmScorecard(html, targetUrl, startTime) {
       question_id: qId,
       question_type: qType,
       section: qSecName,
-      question_text: qText,
-      question_image: qImg,
-      question_html: "",
+      question_text: qData.text,
+      question_image: qData.image,
+      question_html: qData.html,
       options: options,
       chosen_option: (chosenRaw !== null ? chosenRaw : "Not Answered"),
       chosen_option_id: chosenOptId,
@@ -216,7 +306,7 @@ function parseDigialmScorecard(html, targetUrl, startTime) {
       right_option_no: rightPos,
       status: status
     });
-  }
+  });
 
   // Calculate Section Marks
   Object.keys(section_summary).forEach(secKey => {

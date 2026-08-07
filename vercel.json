@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "rewrites": [
+    {
+      "source": "/api/digialm",
+      "destination": "/api/digialm.js"
+    },
+    {
+      "source": "/digialm",
+      "destination": "/api/digialm.js"
+    }
+  ]
+}

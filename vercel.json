@@ -1,13 +1,27 @@
 {
   "version": 2,
-  "rewrites": [
+  "builds": [
     {
-      "source": "/api/digialm",
-      "destination": "/api/digialm.js"
+      "src": "api/digialm.js",
+      "use": "@vercel/node"
     },
     {
-      "source": "/digialm",
-      "destination": "/api/digialm.js"
+      "src": "index.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/digialm",
+      "dest": "api/digialm.js"
+    },
+    {
+      "src": "/digialm",
+      "dest": "api/digialm.js"
+    },
+    {
+      "src": "/",
+      "dest": "index.js"
     }
   ]
 }

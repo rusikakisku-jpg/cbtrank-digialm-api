@@ -1,0 +1,8 @@
+{
+  "name": "cbt-rank-digialm-api",
+  "version": "1.0.0",
+  "description": "Vercel Serverless DigiALM API with Bright Data Indian ISP Proxy",
+  "dependencies": {
+    "https-proxy-agent": "^7.0.4"
+  }
+}
